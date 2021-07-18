@@ -114,7 +114,7 @@ impl<I2C, DELAY> NeoTrellis<I2C, DELAY>
         
         neotrellis.soft_reset()?;
         neotrellis.setup_neopixel()?;
-        neotrellis.setup_keypad()?;
+        //neotrellis.setup_keypad()?;
 
         Ok(neotrellis)
     }
