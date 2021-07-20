@@ -201,7 +201,9 @@ impl<I2C, DELAY> NeoTrellis<I2C, DELAY>
         command[2..5].copy_from_slice(&color.as_grb_slice());
 
         self.write_register(Module::Neopixel, NEOPIXEL_BUF, &command)?;
-
+        
+        self.delay.delay_ms(1);
+        
         Ok(())
     }
 
