@@ -8,4 +8,5 @@ edition = "2018"
 
 [dependencies]
 embedded-hal = "0.2.4"
+heapless = "0.7.3"
 num_enum = { version = "0.5.1", default-features = false }
