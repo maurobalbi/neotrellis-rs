@@ -4,12 +4,12 @@ mod error;
 
 use core::convert::TryFrom;
 
-use heapless::Vec;
-
 pub use crate::error::Error;
-use embedded_hal::blocking::delay::DelayMs;
+use embedded_hal::blocking::delay::{DelayMs, DelayUs};
 use embedded_hal::blocking::i2c::{Read, Write};
 use num_enum::{IntoPrimitive, TryFromPrimitive};
+
+use core::convert::TryInto;
 
 #[derive(Clone, Copy)]
 pub struct Color {
@@ -39,6 +39,12 @@ pub enum Event {
 #[derive(Clone, Copy)]
 pub struct KeypadEvent {
   pub key: Key,
+  pub event: Event,
+}
+
+#[derive(Clone, Copy)]
+pub struct MultiEvent {
+  pub coordinate: (u8, u8),
   pub event: Event,
 }
 
@@ -104,59 +110,68 @@ const KEYPAD_FIFO: u8 = 0x10;
 
 const HW_ID_CODE: u8 = 0x55;
 
-pub enum Selector {
-    Index(u8),
-    Coordinate(u8, u8),
-}
-
-impl Selector {
-    fn new<A>(args: A) -> Self
-    where
-        A: Into<Selector>,
-    {
-        args.into()
-    }
-}
-
-impl From<u8> for Selector {
-    fn from(a: u8) -> Selector {
-        Selector::Index(a)
-    }
-}
-
-impl From<(u8, u8)> for Selector {
-    fn from((a, b): (u8, u8)) -> Selector {
-        Selector::Coordinate(a, b)
-    }
-}
-
 impl<'a, I2> MultiTrellis<'a, I2>
 where
   I2: Read + Write,
   <I2 as Read>::Error: core::fmt::Debug,
   <I2 as Write>::Error: core::fmt::Debug,
 {
-  pub fn set_led_color<DELAY: DelayMs<u32>>(
+  pub fn set_led_color<DELAY: DelayMs<u32> + DelayUs<u32>>(
     &mut self,
-    index: Selector,
+    index: (u8, u8),
+    color: Color,
     delay: &mut DELAY,
   ) -> Result<(), Error<I2>> {
-      self.trellis[0][0].set_led_color(0, Color::rgb(125, 125, 125), delay)?;
+    let (x, y) = index;
 
-      Ok(())
+    let tx = usize::from(x / 4);
+    let ty = usize::from(y / 4);
+
+    let i = x % 4 + (y % 4) * 4;
+
+    if tx < self.trellis.len() && ty < self.trellis[tx].len() {
+      self.trellis[tx][ty].set_led_color(i, color, delay)?;
+    }
+
+    Ok(())
   }
 
-  pub fn show<DELAY: DelayMs<u32>>(
-    &mut self,
-    delay: &mut DELAY,
-  ) -> Result<(), Error<I2>> {
-
+  pub fn show<DELAY: DelayUs<u32>>(&mut self, delay: &mut DELAY) -> Result<(), Error<I2>> {
     for row in self.trellis.iter_mut() {
       for trellis in row.iter_mut() {
         trellis.show_led(delay)?
       }
-    }    
+    }
 
+    Ok(())
+  }
+
+  pub fn read_events<DELAY: DelayMs<u32>>(
+    &mut self,
+    events: &mut [Option<MultiEvent>],
+    delay: &mut DELAY,
+  ) -> Result<(), Error<I2>> {
+    
+    for (x, row) in self.trellis.iter_mut().enumerate() {
+      for (y, trellis) in row.iter_mut().enumerate() {
+        let mut single_event = [None; 16];
+        trellis.read_key_events(&mut single_event, delay)?;
+
+        for e in single_event {
+          let xc: u8= x.try_into().unwrap();
+          let yc: u8 = y.try_into().unwrap();
+          match e {
+            Some(KeypadEvent { key, event }) => {
+              events[x + 4 * y] = Some(MultiEvent {
+                coordinate: (4 * xc + key.index() % 4, 4 * yc + key.index() / 4),
+                event
+              })
+            },
+            _ => ()
+          }
+        }
+      }
+    }
 
     Ok(())
   }
@@ -171,7 +186,7 @@ where
   pub fn new<DELAY: DelayMs<u32>>(
     bus: I2C,
     address: u8,
-    delay: &mut DELAY
+    delay: &mut DELAY,
   ) -> Result<Self, Error<I2C>> {
     let mut neotrellis = Self { bus, address };
 
@@ -237,7 +252,7 @@ where
     module: Module,
     register: u8,
     value: &mut [u8],
-    delay: &mut DELAY
+    delay: &mut DELAY,
   ) -> Result<(), Error<I2C>> {
     let command = [module.into(), register];
     self
@@ -274,7 +289,12 @@ where
     Ok(())
   }
 
-  pub fn set_led_color<DELAY: DelayMs<u32>>(&mut self, led: u8, color: Color, delay: &mut DELAY) -> Result<(), Error<I2C>> {
+  pub fn set_led_color<DELAY: DelayUs<u32>>(
+    &mut self,
+    led: u8,
+    color: Color,
+    delay: &mut DELAY,
+  ) -> Result<(), Error<I2C>> {
     let led_address = (led as u16) * 3;
     let mut command = [0u8; 5];
 
@@ -283,23 +303,32 @@ where
 
     self.write_register(Module::Neopixel, NEOPIXEL_BUF, &command)?;
 
-    delay.delay_ms(1);
+    delay.delay_us(100);
 
     Ok(())
   }
 
-  pub fn show_led<DELAY: DelayMs<u32>>(&mut self, delay: &mut DELAY) -> Result<(), Error<I2C>> {
+  pub fn show_led<DELAY: DelayUs<u32>>(&mut self, delay: &mut DELAY) -> Result<(), Error<I2C>> {
     self.write_register(Module::Neopixel, NEOPIXEL_SHOW, &[])?;
 
-    delay.delay_ms(8);
+    delay.delay_us(100);
 
     Ok(())
   }
 
-  pub fn read_key_events<DELAY: DelayMs<u32>>(&mut self, events: &mut [Option<KeypadEvent>], delay:&mut DELAY) -> Result<(), Error<I2C>> {
+  pub fn read_key_events<DELAY: DelayMs<u32>>(
+    &mut self,
+    events: &mut [Option<KeypadEvent>],
+    delay: &mut DELAY,
+  ) -> Result<(), Error<I2C>> {
     assert!(events.len() <= 32);
     let mut buffer = [0u8; 32];
-    self.read_register(Module::Keypad, KEYPAD_FIFO, &mut buffer[0..events.len()], delay)?;
+    self.read_register(
+      Module::Keypad,
+      KEYPAD_FIFO,
+      &mut buffer[0..events.len()],
+      delay,
+    )?;
 
     for (i, item) in buffer[0..events.len()].iter().enumerate() {
       events[i] = if *item == 0xff {
